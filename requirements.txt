@@ -7,3 +7,4 @@ langchain
 ipython
 pypdf
 chromadb
+sqlite3==3.35.0
