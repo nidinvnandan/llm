@@ -1,50 +1,100 @@
 import streamlit as st
-import os
-from llama_index import VectorStoreIndex, SimpleDirectoryReader, ServiceContext
-from llama_index.llms import HuggingFaceLLM
-from llama_index.prompts.prompts import SimpleInputPrompt
-from langchain.embeddings.huggingface import HuggingFaceEmbeddings
-from llama_index.embeddings import LangchainEmbedding
-from huggingface_hub import login
-os.environ['HF_TOKEN']=os.getenv('HF_TOKEN')
-login(token=os.getenv('HF_TOKEN'))
-
-documents = SimpleDirectoryReader('data').load_data()
-# Set up LLama2
-system_prompt = """
-You are a Q&A assistant. Your goal is to answer questions as
-accurately as possible based on the question and context provided.
-"""
-query_wrapper_prompt = SimpleInputPrompt("{query_str}")
-
-llm = HuggingFaceLLM(
-    context_window=4096,
-    max_new_tokens=256,
-    generate_kwargs={"temperature": 6.0, "do_sample": False},
-    system_prompt=system_prompt,
-    query_wrapper_prompt=query_wrapper_prompt,
-    tokenizer_name="meta-llama/Llama-2-7b-chat-hf",
-    model_name="meta-llama/Llama-2-7b-chat-hf",
-    device_map="auto",
-)
-
-embed_model = LangchainEmbedding(HuggingFaceEmbeddings(model_name="sentence-transformers/all-mpnet-base-v2"))
-
-service_context = ServiceContext.from_defaults(
-    chunk_size=1024,
-    llm=llm,
-    embed_model=embed_model
-)
-
-index = VectorStoreIndex.from_documents(documents, service_context=service_context)
-query_engine = index.as_query_engine()
+import google.generativeai as genai
+import os 
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import HumanMessage
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain.memory import ConversationBufferMemory
+import pandas as pd
+from langchain import PromptTemplate
+from langchain.chains.question_answering import load_qa_chain
+from langchain.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.vectorstores import Chroma
+from IPython.display import display
+from IPython.display import Markdown
+from langchain.chains import RetrievalQA
+from langchain import LLMChain
+from langchain.agents import AgentExecutor, Tool, ZeroShotAgent
+from langchain.chains import RetrievalQA
+from langchain.chains.question_answering import load_qa_chain
+from langchain.docstore.document import Document
+from langchain.memory import ConversationBufferMemory
 
 
-# Streamlit app
-st.title("HR Chatbot")
+st.title("HR Chatbot 🤖")
+@st.cache_resource
+def load_and_split_pdf(pdf_path):
+    pdf_loader = PyPDFLoader(pdf_path)
+    pages = pdf_loader.load_and_split()
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=100)
+    context = "\n\n".join(str(p.page_content) for p in pages)
+    texts = text_splitter.split_text(context)
+    return texts
+pdf_path = "ZETA_CORPORATION.pdf"
+texts = load_and_split_pdf(pdf_path)
+GOOGLE_API_KEY=os.getenv('GOOGLE_API')
+embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001",google_api_key=GOOGLE_API_KEY,convert_system_message_to_human=True)
+@st.cache_resource
+def vector():
 
+    vector_index =  Chroma.from_texts(texts, embeddings)
+    vector_index=vector_index.as_retriever(search_type='mmr')
+    return vector_index
+vector_index = vector()
 
-user_input = st.text_input("Ask a question:")
-if st.button("Ask"):
-    response = query_engine.query(user_input)
-    st.write(response)
+model = ChatGoogleGenerativeAI(model="gemini-pro",google_api_key=GOOGLE_API_KEY,
+                             temperature=0.7,convert_system_message_to_human=True)
+# Define the function
+def answer_question(input_text):
+    template = """be act like a HR officer and answer the questions to the employye in detail
+    {context}
+    Question: {question}
+    Helpful Answer:"""
+    QA_CHAIN_PROMPT = PromptTemplate.from_template(template)
+    qa_chain = RetrievalQA.from_chain_type(
+        model,
+        retriever=vector_index,
+        return_source_documents=True,
+        chain_type_kwargs={"prompt": QA_CHAIN_PROMPT}
+    )
+    tools = [
+        Tool(
+            name="HR Manager",
+            func=qa_chain,
+            description="Useful for when you need to answer questions about the aspects asked. Input may be a partial or fully formed question."
+        )
+    ]
+    prefix = """Have a conversation with a human, answering the following questions as best you can based on the context and memory available.
+                You have access to a single tool:"""
+    suffix = """Begin!
+    {chat_history}
+    Question: {input}
+    {agent_scratchpad}"""
+    prompt = ZeroShotAgent.create_prompt(
+        tools,
+        prefix=prefix,
+        suffix=suffix,
+        input_variables=["input", "chat_history", "agent_scratchpad"],
+    )
+    memory = ConversationBufferMemory(
+        memory_key="chat_history"
+    )
+    llm_chain = LLMChain(
+        llm=model,
+        prompt=prompt,
+    )
+    agent = ZeroShotAgent(llm_chain=llm_chain, tools=tools, verbose=True)
+    agent_chain = AgentExecutor.from_agent_and_tools(
+        agent=agent, tools=tools, verbose=True, memory=memory
+    )
+    result = agent_chain({"input": input_text})
+    return result['output']
+# User interface 
+query = st.text_input('Enter the query')
+if st.button('➤'):
+    if query:
+        result = answer_question(query)
+        st.write(result)
+    else:
+        st.write("Please enter a query.")
