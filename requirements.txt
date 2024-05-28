@@ -2,7 +2,7 @@ langchain
 streamlit
 PyPDF2
 google.generativeai
-pip install -U langchain-community
+langchain-community
 langchain-google-genai
 langchain
 ipython
